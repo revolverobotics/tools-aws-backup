@@ -1,16 +1,42 @@
-echo "Enumerating all EC2 instances for backup..."
+# how long to keep the snapshots
+daysToKeep=60
 
-EC2_INSTANCES="$(aws ec2 describe-instances --query "Reservations[].Instances[].[InstanceId,State.Name,Tags[?Key=='Name'].Value | [0], BlockDeviceMappings[], InstanceType]" --output text)"
+# standard prefix for auto-generated snapshots
+prefix="[Backup]"
 
-IFS=$'\n' read -rd '' -a EC2_INSTANCES_ARRAY <<< "${EC2_INSTANCES}"
+# Get all instances
+ec2_instances="$(aws ec2 describe-instances --query "Reservations[].Instances[].{InstanceId:InstanceId,InstanceState:State.Name,Name:Tags[?Key=='Name'].Value | [0],Volumes:BlockDeviceMappings[*].Ebs[].VolumeId | [0]}" --output text)"
+IFS=$'\n' read -rd '' -a ec2_instances_array <<< "${ec2_instances}"
+ec2_instances=${#ec2_instances_array[@]}
 
-EC2_INSTANCES=${#EC2_INSTANCES_ARRAY[@]}
-
-echo "Found ($EC2_INSTANCES) instances."
-
-for instance in "${EC2_INSTANCES_ARRAY[@]}"
+# Loop through our instances
+for instance in "${ec2_instances_array[@]}"
 do
-  printf '%s\t' "${instance[@]}"
-  echo ""
-done
+  # Put instance data into an array
+  IFS=$'\t' read -a instance_array <<< "${instance}"
 
+  # If the instance isn't running, skip
+  if [ "${instance_array[1]}" != "running" ]; then
+    echo "Skipping non-running instance"
+    continue
+  fi
+
+  # Assign variables
+  instanceId="${instance_array[0]}"
+  instanceName="${instance_array[2]}"
+  volumeId="${instance_array[3]}"
+
+  # generate a timestamp
+  date=$(date +"%Y-%m-%d %H:%M:%S");
+
+  # concatenate all information into one description
+  description="$prefix $instanceName ($instanceId) [$volumeId]"
+
+  # create a new snapshot
+  snapshot=$(aws ec2 create-snapshot --volume-id $volumeId --description "$description")
+
+  # tag snapshot
+  snapshotId=$(echo "$snapshot" | grep SnapshotId)
+  snapshotId=$(echo "$snapshotId" | awk '/snap-*/ {print $2}' | sed -e 's/^"//' -e 's/",$//')
+  aws ec2 create-tags --resources $snapshotId --tags "Key=Name,Value='$instanceName'"
+done
